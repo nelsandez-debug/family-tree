@@ -1,39 +1,40 @@
-# Cloudflare Workflows Starter Template
+# Family Tree
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/templates/tree/main/workflows-starter-template)
+An infinite canvas of personal badges. Drag from a parent's bottom dot to a child's top dot to connect them, then click a badge to edit its photo, dates, location and bio. Changes are shared with everyone using the app.
 
-<!-- dash-content-start -->
+- **Frontend:** React, Vite, Tailwind, [React Flow](https://reactflow.dev)
+- **API:** a Cloudflare Worker (`worker/`)
+- **Data:** D1 (`people`, `edges`), schema in `migrations/`
+- **Photos:** R2, center-cropped and resized in the browser before upload
 
-A real-time, interactive demonstration of [Cloudflare Workflows](https://developers.cloudflare.com/workflows) with live updates via WebSockets and Durable Objects. This template showcases durable multi-step workflows with time-based delays, event-driven pauses, and real-time status visualization.
-
-<!-- dash-content-end -->
-
-![Cloudflare Workflows Starter Template](assets/template-screenshot.png)
-
-## Getting Started
-
-### Installation
+## Develop
 
 ```bash
 npm install
+npm run db:migrate:local   # create the local D1 schema
+npm run dev                # http://localhost:5173
+npm test                   # API tests (vitest in the Workers runtime)
 ```
 
-### Development
+## Deploy
 
 ```bash
-npm run dev
-```
-
-Visit `http://localhost:5173` to see the interactive demo.
-
-### Deployment
-
-```bash
+npx wrangler d1 create family-tree            # paste database_id into wrangler.jsonc
+npx wrangler r2 bucket create family-tree-photos
+npm run db:migrate                            # apply schema to the remote D1
 npm run deploy
 ```
 
-## Learn More
+**Access control:** the app has no login of its own. Before sharing the URL, protect it with
+[Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/policies/access/) and an
+email allowlist for your family.
 
-- [Cloudflare Workflows Documentation](https://developers.cloudflare.com/workflows)
-- [Durable Objects Documentation](https://developers.cloudflare.com/durable-objects)
-- [Workers Documentation](https://developers.cloudflare.com/workers)
+## Rules enforced by the API
+
+- A person has at most 2 parents, and links cannot form a cycle.
+- Deleting a person removes their links and photo.
+- Photos must be images under 2MB. Concurrent edits are last-write-wins; the canvas refreshes when you return to the tab.
+
+## Ideas for later
+
+Partner links in the UI (the API already supports `type: "partner"`), rich-text bios, image export, live sync via Durable Objects.

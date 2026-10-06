@@ -4,7 +4,7 @@
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "workflows-starter-template",
+	"name": "family-tree",
 	"main": "worker/index.ts",
 	"compatibility_date": "2025-10-08",
 	"assets": {
@@ -15,38 +15,26 @@
 		"enabled": true
 	},
 	/**
-	 * Workflows
-	 * Define Workflows to orchestrate multi-step processes
-	 * https://developers.cloudflare.com/workflows/
+	 * D1: people and parent/partner links
+	 * Create with: npx wrangler d1 create family-tree, then paste the database_id.
+	 * Apply the schema with: npm run db:migrate (or db:migrate:local)
 	 */
-	"workflows": [
+	"d1_databases": [
 		{
-			"name": "my-workflow",
-			"binding": "MY_WORKFLOW",
-			"class_name": "MyWorkflow"
+			"binding": "DB",
+			"database_name": "family-tree",
+			"database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "migrations"
 		}
 	],
 	/**
-	 * Durable Objects
-	 * Used for WebSocket state management and real-time updates
-	 * https://developers.cloudflare.com/durable-objects/
+	 * R2: profile photos
+	 * Create with: npx wrangler r2 bucket create family-tree-photos
 	 */
-	"durable_objects": {
-		"bindings": [
-			{
-				"name": "WORKFLOW_STATUS",
-				"class_name": "WorkflowStatusDO"
-			}
-		]
-	},
-	/**
-	 * Migrations
-	 * Required for Durable Objects
-	 */
-	"migrations": [
+	"r2_buckets": [
 		{
-			"tag": "v1",
-			"new_sqlite_classes": ["WorkflowStatusDO"]
+			"binding": "PHOTOS",
+			"bucket_name": "family-tree-photos"
 		}
 	],
 	"upload_source_maps": true
