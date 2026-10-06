@@ -1,125 +1,114 @@
-// Export the Workflow and Durable Object classes
-export { MyWorkflow } from "./workflow";
-export { WorkflowStatusDO } from "./durable-object";
+import { addEdge, deleteEdge, ApiError } from "./edges";
+import { createPerson, deletePerson, loadTree, updatePerson } from "./people";
 
-/**
- * Main Worker fetch handler
- *
- * Handles API routes and WebSocket upgrade requests for workflow management:
- * - POST /api/workflow/start - Create new workflow instance
- * - GET /api/workflow/status/:id - Get workflow status
- * - POST /api/workflow/event/:id - Send events to workflow
- * - GET /ws - WebSocket connection for real-time updates
- */
+const MAX_PHOTO_BYTES = 2 * 1024 * 1024;
+
+async function readJson(request: Request): Promise<Record<string, unknown>> {
+	try {
+		const body = await request.json();
+		if (body && typeof body === "object") {
+			return body as Record<string, unknown>;
+		}
+	} catch {
+		// fall through
+	}
+	throw new ApiError(400, "Invalid JSON body");
+}
+
+async function putPhoto(env: Env, id: string, request: Request) {
+	const type = request.headers.get("content-type") ?? "";
+	if (!type.startsWith("image/")) throw new ApiError(415, "Expected an image");
+	const body = await request.arrayBuffer();
+	if (body.byteLength === 0 || body.byteLength > MAX_PHOTO_BYTES) {
+		throw new ApiError(413, "Photo must be under 2MB");
+	}
+	const exists = await env.DB.prepare("SELECT 1 FROM people WHERE id = ?")
+		.bind(id)
+		.first();
+	if (!exists) throw new ApiError(404, "Person not found");
+	await env.PHOTOS.put(`photos/${id}`, body, {
+		httpMetadata: { contentType: type },
+	});
+	const row = await env.DB.prepare(
+		"UPDATE people SET photo_version = photo_version + 1, updated_at = ? WHERE id = ? RETURNING photo_version",
+	)
+		.bind(Date.now(), id)
+		.first<{ photo_version: number }>();
+	return Response.json({ photoVersion: row?.photo_version ?? 0 });
+}
+
+async function getPhoto(env: Env, id: string) {
+	const object = await env.PHOTOS.get(`photos/${id}`);
+	if (!object) return new Response("Not found", { status: 404 });
+	return new Response(object.body, {
+		headers: {
+			"content-type": object.httpMetadata?.contentType ?? "image/jpeg",
+			// URL carries ?v=<photoVersion>, so it is safe to cache hard
+			"cache-control": "public, max-age=31536000, immutable",
+		},
+	});
+}
+
+async function route(request: Request, env: Env): Promise<Response> {
+	const { pathname } = new URL(request.url);
+	const method = request.method;
+	const parts = pathname.split("/").filter(Boolean); // ["api", ...]
+
+	if (method === "GET" && pathname === "/api/tree") {
+		return Response.json(await loadTree(env.DB));
+	}
+
+	if (parts[1] === "people") {
+		if (parts.length === 2 && method === "POST") {
+			return Response.json(
+				await createPerson(env.DB, await readJson(request)),
+				{ status: 201 },
+			);
+		}
+		const id = parts[2];
+		if (parts.length === 3 && method === "PATCH") {
+			return Response.json(
+				await updatePerson(env.DB, id, await readJson(request)),
+			);
+		}
+		if (parts.length === 3 && method === "DELETE") {
+			await env.PHOTOS.delete(`photos/${id}`);
+			await deletePerson(env.DB, id);
+			return new Response(null, { status: 204 });
+		}
+		if (parts[3] === "photo" && method === "PUT") {
+			return putPhoto(env, id, request);
+		}
+		if (parts[3] === "photo" && method === "GET") {
+			return getPhoto(env, id);
+		}
+	}
+
+	if (parts[1] === "edges") {
+		if (parts.length === 2 && method === "POST") {
+			return Response.json(await addEdge(env.DB, await readJson(request)), {
+				status: 201,
+			});
+		}
+		if (parts.length === 3 && method === "DELETE") {
+			await deleteEdge(env.DB, parts[2]);
+			return new Response(null, { status: 204 });
+		}
+	}
+
+	throw new ApiError(404, "Not found");
+}
+
 export default {
 	async fetch(request: Request, env: Env): Promise<Response> {
-		const url = new URL(request.url);
-
-		// API: Start a new workflow instance
-		if (url.pathname === "/api/workflow/start" && request.method === "POST") {
-			try {
-				const instance = await env.MY_WORKFLOW.create({
-					params: {
-						timestamp: Date.now(),
-					},
-				});
-
-				return Response.json({
-					instanceId: instance.id,
-					message: "Workflow started successfully",
-				});
-			} catch {
-				return Response.json(
-					{ error: "Failed to start workflow" },
-					{ status: 500 },
-				);
+		try {
+			return await route(request, env);
+		} catch (err) {
+			if (err instanceof ApiError) {
+				return Response.json({ error: err.message }, { status: err.status });
 			}
+			console.error(err);
+			return Response.json({ error: "Internal error" }, { status: 500 });
 		}
-
-		// API: Get workflow status
-		if (url.pathname.startsWith("/api/workflow/status/")) {
-			const instanceId = url.pathname.split("/").pop();
-			if (!instanceId) {
-				return Response.json(
-					{ error: "Instance ID required" },
-					{ status: 400 },
-				);
-			}
-
-			try {
-				const instance = await env.MY_WORKFLOW.get(instanceId);
-				const status = await instance.status();
-				return Response.json(status);
-			} catch {
-				return Response.json(
-					{ error: "Failed to get workflow status" },
-					{ status: 500 },
-				);
-			}
-		}
-
-		// API: Send event to workflow instance
-		if (
-			url.pathname.startsWith("/api/workflow/event/") &&
-			request.method === "POST"
-		) {
-			const instanceId = url.pathname.split("/").pop();
-			if (!instanceId) {
-				return Response.json(
-					{ error: "Instance ID required" },
-					{ status: 400 },
-				);
-			}
-
-			try {
-				const body = (await request.json()) as {
-					approved: boolean;
-					comment?: string;
-				};
-				const instance = await env.MY_WORKFLOW.get(instanceId);
-
-				await instance.sendEvent({
-					type: "user-approval",
-					payload: body,
-				});
-
-				return Response.json({
-					success: true,
-					message: "Event sent successfully",
-				});
-			} catch {
-				return Response.json(
-					{ error: "Failed to send event" },
-					{ status: 500 },
-				);
-			}
-		}
-
-		// WebSocket: Connect to workflow status updates
-		if (url.pathname === "/ws") {
-			const instanceId = url.searchParams.get("instanceId");
-			if (!instanceId) {
-				return new Response("instanceId query parameter required", {
-					status: 400,
-				});
-			}
-
-			const upgradeHeader = request.headers.get("Upgrade");
-			if (upgradeHeader !== "websocket") {
-				return new Response("Expected Upgrade: websocket", { status: 426 });
-			}
-
-			try {
-				const doId = env.WORKFLOW_STATUS.idFromName(instanceId);
-				const stub = env.WORKFLOW_STATUS.get(doId);
-				return stub.fetch(request);
-			} catch {
-				return new Response("Failed to establish WebSocket connection", {
-					status: 500,
-				});
-			}
-		}
-
-		return Response.json({ error: "Not Found" }, { status: 404 });
 	},
 } satisfies ExportedHandler<Env>;

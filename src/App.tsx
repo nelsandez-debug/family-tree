@@ -1,123 +1,284 @@
-import { useState, useEffect } from "react";
-import { WorkflowDiagram } from "./components/WorkflowDiagram";
-import { CodeDisplay } from "./components/CodeDisplay";
-import { BackgroundDots } from "./components/BackgroundDots";
-import { useWorkflowWebSocket } from "./hooks/useWorkflowWebSocket";
-import { WORKFLOW_STEPS } from "./types";
+import {
+	Background,
+	BackgroundVariant,
+	Controls,
+	MiniMap,
+	ReactFlow,
+	ReactFlowProvider,
+	useReactFlow,
+	type Connection,
+	type Edge,
+	type NodeChange,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { api } from "./api";
+import { BadgeNode, type BadgeNodeType } from "./components/BadgeNode";
+import { DetailPanel } from "./components/DetailPanel";
+import { NODE_H, NODE_W, autoLayout } from "./layout";
+import type { Link, Person, PersonFields } from "./types";
 
-function App() {
-	const [instanceId, setInstanceId] = useState<string | null>(null);
-	const [isStarting, setIsStarting] = useState(false);
-	const workflowState = useWorkflowWebSocket(instanceId);
+const nodeTypes = { badge: BadgeNode };
 
-	useEffect(() => {
-		if (workflowState.workflowStatus === "completed") {
-			const timer = setTimeout(() => {
-				setInstanceId(null);
-			}, 1500);
-			return () => clearTimeout(timer);
-		}
-	}, [workflowState.workflowStatus]);
+function Canvas() {
+	const [people, setPeople] = useState<Person[]>([]);
+	const [links, setLinks] = useState<Link[]>([]);
+	const [selectedId, setSelectedId] = useState<string | null>(null);
+	const [error, setError] = useState<string | null>(null);
+	const [loading, setLoading] = useState(true);
+	// Live drag positions, kept apart from `people` until the drag ends.
+	const [dragging, setDragging] = useState<Record<string, { x: number; y: number }>>({});
+	const flow = useReactFlow();
 
-	useEffect(() => {
-		if (
-			workflowState.workflowStatus === "running" &&
-			workflowState.currentStep
-		) {
-			setIsStarting(false);
-		}
-	}, [workflowState.workflowStatus, workflowState.currentStep]);
+	const fail = useCallback((err: unknown) => {
+		setError(err instanceof Error ? err.message : "Something went wrong");
+		window.setTimeout(() => setError(null), 4000);
+	}, []);
 
-	const handleStartWorkflow = async () => {
-		setIsStarting(true);
-
+	const refresh = useCallback(async () => {
 		try {
-			const response = await fetch("/api/workflow/start", {
-				method: "POST",
-			});
+			const tree = await api.tree();
+			setPeople(tree.people);
+			setLinks(tree.edges);
+		} catch (err) {
+			fail(err);
+		} finally {
+			setLoading(false);
+		}
+	}, [fail]);
 
-			if (!response.ok) {
-				throw new Error("Failed to start workflow");
+	useEffect(() => {
+		void refresh();
+		// Pick up other family members' edits whenever you come back to the tab.
+		const onFocus = () => void refresh();
+		window.addEventListener("focus", onFocus);
+		return () => window.removeEventListener("focus", onFocus);
+	}, [refresh]);
+
+	const nodes: BadgeNodeType[] = useMemo(
+		() =>
+			people.map((person) => ({
+				id: person.id,
+				type: "badge",
+				position: dragging[person.id] ?? { x: person.x, y: person.y },
+				data: { person },
+				selected: person.id === selectedId,
+			})),
+		[people, dragging, selectedId],
+	);
+
+	const edges: Edge[] = useMemo(
+		() =>
+			links
+				.filter((l) => l.type === "parent")
+				.map((l) => ({
+					id: l.id,
+					source: l.parentId,
+					target: l.childId,
+					type: "smoothstep",
+				})),
+		[links],
+	);
+
+	const patchLocal = (id: string, fields: PersonFields) =>
+		setPeople((ps) => ps.map((p) => (p.id === id ? { ...p, ...fields } : p)));
+
+	const save = useCallback(
+		async (id: string, fields: PersonFields) => {
+			patchLocal(id, fields);
+			try {
+				await api.updatePerson(id, fields);
+			} catch (err) {
+				fail(err);
+				void refresh();
 			}
+		},
+		[fail, refresh],
+	);
 
-			const data = await response.json();
-			setInstanceId(data.instanceId);
-		} catch {
-			alert("Failed to start workflow. Please try again.");
-			setIsStarting(false);
+	const onNodesChange = useCallback(
+		(changes: NodeChange<BadgeNodeType>[]) => {
+			for (const c of changes) {
+				if (c.type === "position" && c.position) {
+					const { id, position } = c;
+					setDragging((d) => ({ ...d, [id]: position }));
+					if (c.dragging === false) {
+						setDragging(({ [id]: _done, ...rest }) => rest);
+						void save(id, { x: position.x, y: position.y });
+					}
+				}
+				if (c.type === "select" && c.selected) setSelectedId(c.id);
+			}
+		},
+		[save],
+	);
+
+	const addPerson = useCallback(
+		async (fields: PersonFields = {}) => {
+			const bounds = document.querySelector(".react-flow")?.getBoundingClientRect();
+			const center = flow.screenToFlowPosition({
+				x: (bounds?.left ?? 0) + (bounds?.width ?? 600) / 2,
+				y: (bounds?.top ?? 0) + (bounds?.height ?? 400) / 2,
+			});
+			try {
+				const person = await api.createPerson({
+					x: center.x - NODE_W / 2,
+					y: center.y - NODE_H / 2,
+					...fields,
+				});
+				setPeople((ps) => [...ps, person]);
+				setSelectedId(person.id);
+				return person;
+			} catch (err) {
+				fail(err);
+			}
+		},
+		[flow, fail],
+	);
+
+	const addRelative = async (id: string, kind: "parent" | "child") => {
+		const anchor = people.find((p) => p.id === id);
+		if (!anchor) return;
+		const offset = kind === "parent" ? -(NODE_H + 80) : NODE_H + 80;
+		const relative = await addPerson({ x: anchor.x, y: anchor.y + offset });
+		if (!relative) return;
+		try {
+			const link =
+				kind === "parent"
+					? await api.addLink(id, relative.id)
+					: await api.addLink(relative.id, id);
+			setLinks((ls) => [...ls, link]);
+		} catch (err) {
+			fail(err);
+			await api.deletePerson(relative.id).catch(() => {});
+			void refresh();
 		}
 	};
 
+	const onConnect = async (c: Connection) => {
+		// parent's bottom handle (source) -> child's top handle (target)
+		try {
+			const link = await api.addLink(c.target, c.source);
+			setLinks((ls) => [...ls, link]);
+		} catch (err) {
+			fail(err);
+		}
+	};
+
+	const removeEdges = async (removed: Edge[]) => {
+		setLinks((ls) => ls.filter((l) => !removed.some((e) => e.id === l.id)));
+		await Promise.all(removed.map((e) => api.deleteLink(e.id))).catch(fail);
+	};
+
+	const removePeople = async (ids: string[]) => {
+		setPeople((ps) => ps.filter((p) => !ids.includes(p.id)));
+		setLinks((ls) =>
+			ls.filter((l) => !ids.includes(l.childId) && !ids.includes(l.parentId)),
+		);
+		setSelectedId((s) => (s && ids.includes(s) ? null : s));
+		await Promise.all(ids.map((id) => api.deletePerson(id))).catch(fail);
+	};
+
+	const tidy = async () => {
+		const positions = autoLayout(people, links);
+		setPeople((ps) =>
+			ps.map((p) => ({ ...p, ...(positions.get(p.id) ?? {}) })),
+		);
+		await Promise.all(
+			[...positions].map(([id, pos]) => api.updatePerson(id, pos)),
+		).catch(fail);
+		window.setTimeout(() => void flow.fitView({ duration: 300 }), 50);
+	};
+
+	const select = (id: string) => {
+		setSelectedId(id);
+		const p = people.find((x) => x.id === id);
+		if (p) {
+			void flow.setCenter(p.x + NODE_W / 2, p.y + NODE_H / 2, {
+				zoom: flow.getZoom(),
+				duration: 300,
+			});
+		}
+	};
+
+	const selected = people.find((p) => p.id === selectedId);
+
 	return (
-		<div className="min-h-screen bg-neutral-50/30 dark:bg-neutral-950 flex flex-col relative">
-			{/* Background dots across entire page */}
-			<div className="absolute inset-0 text-neutral-200/50 dark:text-neutral-700/40 overflow-hidden">
-				<BackgroundDots />
+		<div className="relative h-screen w-screen overflow-hidden bg-neutral-50 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-100">
+			<ReactFlow
+				nodes={nodes}
+				edges={edges}
+				nodeTypes={nodeTypes}
+				onNodesChange={onNodesChange}
+				onConnect={onConnect}
+				onEdgesDelete={removeEdges}
+				onNodesDelete={(ns) => void removePeople(ns.map((n) => n.id))}
+				onNodeClick={(_, n) => setSelectedId(n.id)}
+				onPaneClick={() => setSelectedId(null)}
+				fitView
+				minZoom={0.1}
+				snapToGrid
+				snapGrid={[20, 20]}
+				proOptions={{ hideAttribution: true }}
+			>
+				<Background variant={BackgroundVariant.Dots} gap={20} />
+				<Controls />
+				<MiniMap pannable zoomable />
+			</ReactFlow>
+
+			<div className="absolute left-4 top-4 z-10 flex items-center gap-2">
+				<h1 className="mr-2 text-lg font-semibold">Family Tree</h1>
+				<button
+					onClick={() => void addPerson()}
+					className="rounded-md bg-sky-600 px-3 py-2 text-sm text-white hover:bg-sky-700"
+				>
+					+ Add person
+				</button>
+				<button
+					onClick={() => void tidy()}
+					className="rounded-md bg-white px-3 py-2 text-sm shadow-float ring-glass dark:bg-neutral-800"
+				>
+					Auto-arrange
+				</button>
 			</div>
 
-			{/* Minimal Integrated Header */}
-			<header className="px-6 pt-6 pb-4 relative z-10">
-				<div className="flex items-center justify-between">
-					<div className="flex items-center gap-3">
-						<svg
-							role="img"
-							viewBox="0 0 460 271.2"
-							aria-hidden="true"
-							className="h-5 w-auto opacity-90"
-						>
-							<path
-								fill="#FBAD41"
-								d="M328.6,125.6c-0.8,0-1.5,0.6-1.8,1.4l-4.8,16.7c-2.1,7.2-1.3,13.8,2.2,18.7c3.2,4.5,8.6,7.1,15.1,7.4l26.2,1.6c0.8,0,1.5,0.4,1.9,1c0.4,0.6,0.5,1.5,0.3,2.2c-0.4,1.2-1.6,2.1-2.9,2.2l-27.3,1.6c-14.8,0.7-30.7,12.6-36.3,27.2l-2,5.1c-0.4,1,0.3,2,1.4,2h93.8c1.1,0,2.1-0.7,2.4-1.8c1.6-5.8,2.5-11.9,2.5-18.2c0-37-30.2-67.2-67.3-67.2C330.9,125.5,329.7,125.5,328.6,125.6z"
-							/>
-							<path
-								fill="#F6821F"
-								d="M292.8,204.4c2.1-7.2,1.3-13.8-2.2-18.7c-3.2-4.5-8.6-7.1-15.1-7.4l-123.1-1.6c-0.8,0-1.5-0.4-1.9-1s-0.5-1.4-0.3-2.2c0.4-1.2,1.6-2.1,2.9-2.2l124.2-1.6c14.7-0.7,30.7-12.6,36.3-27.2l7.1-18.5c0.3-0.8,0.4-1.6,0.2-2.4c-8-36.2-40.3-63.2-78.9-63.2c-35.6,0-65.8,23-76.6,54.9c-7-5.2-15.9-8-25.5-7.1c-17.1,1.7-30.8,15.4-32.5,32.5c-0.4,4.4-0.1,8.7,0.9,12.7c-27.9,0.8-50.2,23.6-50.2,51.7c0,2.5,0.2,5,0.5,7.5c0.2,1.2,1.2,2.1,2.4,2.1h227.2c1.3,0,2.5-0.9,2.9-2.2L292.8,204.4z"
-							/>
-						</svg>
-						<div className="w-px h-4 bg-neutral-300/50 dark:bg-neutral-600/50" />
-						<h1 className="text-sm font-medium text-neutral-600 dark:text-neutral-400">
-							Workflows Starter Template
-						</h1>
-					</div>
-
-					<a
-						href="https://developers.cloudflare.com/workflows"
-						target="_blank"
-						rel="noopener noreferrer"
-						className="text-xs font-medium text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-200 transition-colors"
-					>
-						Documentation →
-					</a>
+			{!loading && people.length === 0 && (
+				<div className="pointer-events-none absolute inset-0 flex items-center justify-center text-neutral-500">
+					Add your first person to start the tree.
 				</div>
-			</header>
+			)}
 
-			{/* Main content - unified canvas */}
-			<main className="flex-1 flex flex-col lg:flex-row overflow-hidden relative z-10">
-				{/* Left side - Code (responsive width) */}
-				<div className="w-full lg:w-[60%] overflow-hidden px-6 pb-6">
-					<CodeDisplay
-						currentStep={workflowState.currentStep}
-						workflowStatus={workflowState.workflowStatus}
-						onStartWorkflow={handleStartWorkflow}
-						isStarting={isStarting}
-					/>
+			{error && (
+				<div
+					role="alert"
+					className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-md bg-red-600 px-4 py-2 text-sm text-white shadow-lg"
+				>
+					{error}
 				</div>
+			)}
 
-				{/* Right side - Diagram (responsive width) */}
-				<div className="flex-1 overflow-hidden px-6 lg:pl-8 lg:pr-6 pb-6">
-					<WorkflowDiagram
-						steps={WORKFLOW_STEPS}
-						stepStatuses={workflowState.stepStatuses}
-						currentStep={workflowState.currentStep}
-						instanceId={instanceId}
-						workflowStatus={workflowState.workflowStatus}
-						onStartWorkflow={handleStartWorkflow}
-						isStarting={isStarting}
-					/>
-				</div>
-			</main>
+			{selected && (
+				<DetailPanel
+					person={selected}
+					people={people}
+					edges={links}
+					onChange={(id, fields) => void save(id, fields)}
+					onPhoto={(id, photoVersion) => patchLocal(id, { photoVersion } as PersonFields)}
+					onSelect={select}
+					onAddRelative={(id, kind) => void addRelative(id, kind)}
+					onDelete={(id) => void removePeople([id])}
+					onClose={() => setSelectedId(null)}
+					onError={fail}
+				/>
+			)}
 		</div>
 	);
 }
 
-export default App;
+export default function App() {
+	return (
+		<ReactFlowProvider>
+			<Canvas />
+		</ReactFlowProvider>
+	);
+}
