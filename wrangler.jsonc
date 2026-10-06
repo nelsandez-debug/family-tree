@@ -37,5 +37,14 @@
 			"bucket_name": "family-tree-photos"
 		}
 	],
+	/**
+	 * Durable Object migrations
+	 * v1 came from the original workflows demo this repo started as. v2 removes
+	 * that class, which the deployed Worker still depends on until it is deleted.
+	 */
+	"migrations": [
+		{ "tag": "v1", "new_sqlite_classes": ["WorkflowStatusDO"] },
+		{ "tag": "v2", "deleted_classes": ["WorkflowStatusDO"] }
+	],
 	"upload_source_maps": true
 }
