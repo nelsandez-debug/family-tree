@@ -1,4 +1,13 @@
-import type { Link, Person, PersonFields, Tree } from "./types";
+import type {
+	Link,
+	LinkFields,
+	ParentKind,
+	PartnerKind,
+	Person,
+	PersonFields,
+	TrashedPerson,
+	Tree,
+} from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(path, init);
@@ -15,16 +24,30 @@ const json = (method: string, body: unknown): RequestInit => ({
 	body: JSON.stringify(body),
 });
 
+interface NewLink extends LinkFields {
+	childId: string;
+	parentId: string;
+	type: "parent" | "partner";
+	subtype?: ParentKind | PartnerKind;
+}
+
 export const api = {
 	tree: () => request<Tree>("/api/tree"),
+	trash: () => request<TrashedPerson[]>("/api/trash"),
 	createPerson: (fields: PersonFields) =>
 		request<Person>("/api/people", json("POST", fields)),
 	updatePerson: (id: string, fields: PersonFields) =>
 		request<Person>(`/api/people/${id}`, json("PATCH", fields)),
-	deletePerson: (id: string) =>
+	/** Moves to the Trash; nothing is erased. */
+	trashPerson: (id: string) =>
 		request<void>(`/api/people/${id}`, { method: "DELETE" }),
-	addLink: (childId: string, parentId: string) =>
-		request<Link>("/api/edges", json("POST", { childId, parentId })),
+	restorePerson: (id: string) =>
+		request<Person>(`/api/people/${id}/restore`, { method: "POST" }),
+	purgePerson: (id: string) =>
+		request<void>(`/api/trash/${id}`, { method: "DELETE" }),
+	addLink: (link: NewLink) => request<Link>("/api/edges", json("POST", link)),
+	updateLink: (id: string, fields: LinkFields) =>
+		request<Link>(`/api/edges/${id}`, json("PATCH", fields)),
 	deleteLink: (id: string) =>
 		request<void>(`/api/edges/${id}`, { method: "DELETE" }),
 	uploadPhoto: (id: string, blob: Blob) =>

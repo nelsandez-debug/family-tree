@@ -1,5 +1,13 @@
-import { addEdge, deleteEdge, ApiError } from "./edges";
-import { createPerson, deletePerson, loadTree, updatePerson } from "./people";
+import { addEdge, deleteEdge, updateEdge, ApiError } from "./edges";
+import {
+	createPerson,
+	loadTree,
+	loadTrash,
+	purgePerson,
+	restorePerson,
+	trashPerson,
+	updatePerson,
+} from "./people";
 
 const MAX_PHOTO_BYTES = 2 * 1024 * 1024;
 
@@ -22,7 +30,9 @@ async function putPhoto(env: Env, id: string, request: Request) {
 	if (body.byteLength === 0 || body.byteLength > MAX_PHOTO_BYTES) {
 		throw new ApiError(413, "Photo must be under 2MB");
 	}
-	const exists = await env.DB.prepare("SELECT 1 FROM people WHERE id = ?")
+	const exists = await env.DB.prepare(
+		"SELECT 1 FROM people WHERE id = ? AND deleted_at IS NULL",
+	)
 		.bind(id)
 		.first();
 	if (!exists) throw new ApiError(404, "Person not found");
@@ -58,6 +68,16 @@ async function route(request: Request, env: Env): Promise<Response> {
 		return Response.json(await loadTree(env.DB));
 	}
 
+	if (method === "GET" && pathname === "/api/trash") {
+		return Response.json(await loadTrash(env.DB));
+	}
+
+	if (parts[1] === "trash" && parts.length === 3 && method === "DELETE") {
+		await purgePerson(env.DB, parts[2]);
+		await env.PHOTOS.delete(`photos/${parts[2]}`);
+		return new Response(null, { status: 204 });
+	}
+
 	if (parts[1] === "people") {
 		if (parts.length === 2 && method === "POST") {
 			return Response.json(
@@ -71,10 +91,13 @@ async function route(request: Request, env: Env): Promise<Response> {
 				await updatePerson(env.DB, id, await readJson(request)),
 			);
 		}
+		// Soft delete: the person moves to the Trash and can be restored.
 		if (parts.length === 3 && method === "DELETE") {
-			await env.PHOTOS.delete(`photos/${id}`);
-			await deletePerson(env.DB, id);
+			await trashPerson(env.DB, id);
 			return new Response(null, { status: 204 });
+		}
+		if (parts[3] === "restore" && method === "POST") {
+			return Response.json(await restorePerson(env.DB, id));
 		}
 		if (parts[3] === "photo" && method === "PUT") {
 			return putPhoto(env, id, request);
@@ -89,6 +112,11 @@ async function route(request: Request, env: Env): Promise<Response> {
 			return Response.json(await addEdge(env.DB, await readJson(request)), {
 				status: 201,
 			});
+		}
+		if (parts.length === 3 && method === "PATCH") {
+			return Response.json(
+				await updateEdge(env.DB, parts[2], await readJson(request)),
+			);
 		}
 		if (parts.length === 3 && method === "DELETE") {
 			await deleteEdge(env.DB, parts[2]);

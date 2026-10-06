@@ -8,6 +8,8 @@ export type BadgeNodeType = Node<BadgeData, "badge">;
 const years = (p: Person) =>
 	p.birth || p.death ? `${p.birth ?? "?"} – ${p.death ?? ""}`.trim() : "";
 
+const dot = "!h-3 !w-3";
+
 export function BadgeNode({ data, selected }: NodeProps<BadgeNodeType>) {
 	const { person } = data;
 	const src = photoUrl(person);
@@ -17,7 +19,10 @@ export function BadgeNode({ data, selected }: NodeProps<BadgeNodeType>) {
 				selected ? "outline-2 outline-offset-2 outline-sky-500" : ""
 			}`}
 		>
-			<Handle type="target" position={Position.Top} className="!h-3 !w-3" />
+			{/* top/bottom connect parents and children; left/right connect spouses */}
+			<Handle id="top" type="target" position={Position.Top} className={dot} />
+			<Handle id="left" type="source" position={Position.Left} className={`${dot} !bg-rose-400`} />
+			<Handle id="right" type="source" position={Position.Right} className={`${dot} !bg-rose-400`} />
 			{src ? (
 				<img
 					src={src}
@@ -30,8 +35,11 @@ export function BadgeNode({ data, selected }: NodeProps<BadgeNodeType>) {
 				</div>
 			)}
 			<div className="mt-3 w-full truncate font-semibold">{person.name}</div>
+			<div className="h-4 w-full truncate text-xs text-neutral-500">
+				{person.maidenName ? `née ${person.maidenName}` : ""}
+			</div>
 			<div className="h-5 text-xs text-neutral-500">{years(person)}</div>
-			<Handle type="source" position={Position.Bottom} className="!h-3 !w-3" />
+			<Handle id="bottom" type="source" position={Position.Bottom} className={dot} />
 		</div>
 	);
 }
