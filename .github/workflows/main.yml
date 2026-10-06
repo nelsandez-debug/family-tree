@@ -1,0 +1,4 @@
+git fetch && git checkout claude/family-tree
+npm install
+npx wrangler login
+npm run deploy
