@@ -16,14 +16,14 @@
 	},
 	/**
 	 * D1: people and parent/partner links
-	 * Create with: npx wrangler d1 create family-tree, then paste the database_id.
+	 * Database "family-tree" already created; schema in migrations/ (idempotent).
 	 * Apply the schema with: npm run db:migrate (or db:migrate:local)
 	 */
 	"d1_databases": [
 		{
 			"binding": "DB",
 			"database_name": "family-tree",
-			"database_id": "00000000-0000-0000-0000-000000000000",
+			"database_id": "9f13b1e2-a465-4877-ab9d-e5eb80f28245",
 			"migrations_dir": "migrations"
 		}
 	],
